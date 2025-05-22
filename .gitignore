@@ -56,3 +56,4 @@ nunit-*.xml
 .vs/
 packages/
 *.user
+/UpgradeLog.htm

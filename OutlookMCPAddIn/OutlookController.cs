@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Outlook = Microsoft.Office.Interop.Outlook;
 
 namespace OutlookMcpAddIn
@@ -444,7 +445,7 @@ namespace OutlookMcpAddIn
 
         public McpCreateMeetingResponse CreateMeeting(McpCreateMeetingRequest request)
         {
-            // ***** Ensure OlMailRecipientType.olRequired and olOptional are used correctly *****
+            System.Diagnostics.Debug.WriteLine($"[OutlookController.CreateMeeting] Entered. Thread ID: {Thread.CurrentThread.ManagedThreadId}");
             var response = new McpCreateMeetingResponse { RequestId = request.RequestId };
             if (request.MeetingDetails == null)
             {
@@ -454,6 +455,8 @@ namespace OutlookMcpAddIn
             }
 
             Outlook.AppointmentItem appointment = null;
+            bool allResolved = true; // Assume true initially
+
             try
             {
                 System.Diagnostics.Debug.WriteLine("[CreateMeeting] Trying to create AppointmentItem...");
@@ -468,22 +471,23 @@ namespace OutlookMcpAddIn
                 System.Diagnostics.Debug.WriteLine("[CreateMeeting] AppointmentItem created.");
 
                 var details = request.MeetingDetails;
-
                 appointment.Subject = details.Subject;
                 System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Subject set to: {details.Subject}");
-                appointment.StartUTC = details.StartTimeUtc; // Use UTC properties
+                appointment.StartUTC = details.StartTimeUtc;
                 System.Diagnostics.Debug.WriteLine($"[CreateMeeting] StartUTC set to: {details.StartTimeUtc}");
-                appointment.EndUTC = details.EndTimeUtc;     // Use UTC properties
-                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] EndUTC set to: {details.StartTimeUtc}");
+                appointment.EndUTC = details.EndTimeUtc;
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] EndUTC set to: {details.EndTimeUtc}");
                 appointment.Location = details.Location;
-                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Location set to: {details.StartTimeUtc}");
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Location set to: {details.Location}");
                 appointment.Body = details.Body;
-                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Body set to: {details.StartTimeUtc}");
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Body set.");
                 appointment.AllDayEvent = details.IsAllDay;
-                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] AllDayEvent set to: {details.StartTimeUtc}");
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] AllDayEvent set to: {details.IsAllDay}");
 
-                // appointment.ReminderSet = true; // Optional: set a reminder
-                // appointment.ReminderMinutesBeforeStart = 15; // Optional
+                // Set meeting status to indicate it's a meeting, not just an appointment
+                appointment.MeetingStatus = Outlook.OlMeetingStatus.olMeeting;
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] MeetingStatus set to olMeeting.");
+
 
                 Outlook.Recipients recipients = null;
                 try
@@ -494,11 +498,7 @@ namespace OutlookMcpAddIn
                         foreach (var email in details.RequiredAttendees)
                         {
                             Outlook.Recipient r = null;
-                            try
-                            {
-                                r = recipients.Add(email);
-                                r.Type = (int)Outlook.OlMeetingRecipientType.olRequired; // This IS correct
-                            }
+                            try { r = recipients.Add(email); r.Type = 1; /* olRequired */ } // Using integer literal
                             finally { if (r != null) Marshal.ReleaseComObject(r); }
                         }
                     }
@@ -507,27 +507,27 @@ namespace OutlookMcpAddIn
                         foreach (var email in details.OptionalAttendees)
                         {
                             Outlook.Recipient r = null;
-                            try
-                            {
-                                r = recipients.Add(email);
-                                r.Type = (int)Outlook.OlMeetingRecipientType.olOptional; // This IS correct
-                            }
+                            try { r = recipients.Add(email); r.Type = 2; /* olOptional */ } // Using integer literal
                             finally { if (r != null) Marshal.ReleaseComObject(r); }
                         }
                     }
                     System.Diagnostics.Debug.WriteLine("[CreateMeeting] Attempting to ResolveAll recipients...");
-                    bool resolveAllResult = recipients.ResolveAll(); // Capture the boolean result
+                    bool resolveAllResult = recipients.ResolveAll();
                     System.Diagnostics.Debug.WriteLine($"[CreateMeeting] ResolveAll result: {resolveAllResult}");
                 }
-                catch (COMException ex) { response.Errors.Add(new McpError { Code = "RecipientError", Message = $"Error adding recipients: {ex.Message}" }); }
+                catch (COMException comExRecip)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CreateMeeting] COMException during recipient add/resolve: {comExRecip.ToString()}");
+                    response.Errors.Add(new McpError { Code = "RecipientError", Message = $"Recipient processing error: {comExRecip.Message}" });
+                    // Potentially set response.Status to failure here if this is critical
+                }
                 finally { if (recipients != null) Marshal.ReleaseComObject(recipients); }
 
-
-                bool allResolved = true;
+                // Re-check resolution after ResolveAll
                 Outlook.Recipients finalRecipients = null;
                 try
                 {
-                    finalRecipients = appointment.Recipients; // Get again after ResolveAll
+                    finalRecipients = appointment.Recipients;
                     if (finalRecipients != null && finalRecipients.Count > 0)
                     {
                         for (int i = 1; i <= finalRecipients.Count; i++)
@@ -539,6 +539,7 @@ namespace OutlookMcpAddIn
                                 if (!r.Resolved)
                                 {
                                     allResolved = false;
+                                    System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Unresolved Recipient: {r.Name} (Type: {r.Type})");
                                     response.Errors.Add(new McpError { Code = "UnresolvedRecipient", Message = $"Could not resolve: {r.Name}" });
                                 }
                             }
@@ -546,52 +547,94 @@ namespace OutlookMcpAddIn
                         }
                     }
                 }
-                catch (COMException ex) { response.Errors.Add(new McpError { Code = "ResolutionCheckError", Message = $"Error checking recipient resolution: {ex.Message}" }); }
+                catch (COMException comExResCheck)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CreateMeeting] COMException during final recipient check: {comExResCheck.ToString()}");
+                    response.Errors.Add(new McpError { Code = "ResolutionCheckError", Message = $"Resolution check error: {comExResCheck.Message}" });
+                }
                 finally { if (finalRecipients != null) Marshal.ReleaseComObject(finalRecipients); }
 
+                if (!allResolved && request.SendInvitations)
+                {
+                    System.Diagnostics.Debug.WriteLine("[CreateMeeting] Not attempting to Send due to unresolved recipients.");
+                    response.Errors.Add(new McpError { Code = "SendBlocked", Message = "Cannot send meeting with unresolved recipients." });
+                    response.Status = "failure";
+                    // DO NOT PROCEED TO SEND/SAVE IF INTENDING TO SEND AND RECIPIENTS AREN'T RESOLVED
+                }
+                else // Proceed if all resolved OR if we are just saving (SendInvitations is false)
+                {
+                    if (request.SendInvitations)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[CreateMeeting] Attempting to Send appointment...");
+                        appointment.Send();
+                        System.Diagnostics.Debug.WriteLine("[CreateMeeting] Appointment.Send() called.");
+                        response.Message = "Meeting invitation sent.";
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine("[CreateMeeting] Attempting to Save appointment...");
+                        appointment.Save();
+                        System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Appointment.Save() called. Item IsSaved: {appointment.Saved}"); // CHECK THIS
+                        response.Message = "Meeting saved to calendar.";
+                    }
 
-                if (request.SendInvitations)
-                {
-                    System.Diagnostics.Debug.WriteLine("[CreateMeeting] Attempting to Send appointment...");
-                    appointment.Send();
-                    System.Diagnostics.Debug.WriteLine("[CreateMeeting] Appointment.Send() called.");
-                    response.Message = "Meeting invitation sent.";
+                    // Try to get EntryID. It might still be empty if Save/Send didn't truly persist it.
+                    try
+                    {
+                        response.MeetingId = appointment.EntryID;
+                        if (string.IsNullOrEmpty(response.MeetingId))
+                        {
+                            System.Diagnostics.Debug.WriteLine("[CreateMeeting] CRITICAL: EntryID is STILL EMPTY after Save/Send call.");
+                            if (response.Status != "failure") // If not already marked as failure
+                            {
+                                response.Errors.Add(new McpError { Code = "PersistenceError", Message = "Meeting was processed but could not be persisted or EntryID not obtained." });
+                                // Do not override status if it was already "failure" due to unresolved recipients
+                                if (response.Status == "success" || response.Status == "partial_success") response.Status = "failure";
+                            }
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[CreateMeeting] MeetingId obtained: {response.MeetingId}");
+                        }
+                    }
+                    catch (COMException exEntryId)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[CreateMeeting] COMException when trying to get EntryID: {exEntryId.ToString()}");
+                        response.Errors.Add(new McpError { Code = "EntryIDError", Message = $"Error getting EntryID: {exEntryId.Message}" });
+                        if (response.Status != "failure") response.Status = "failure";
+                    }
+
+                    if (response.Status != "failure") // If not already set to failure
+                    {
+                        response.Status = allResolved ? "success" : "partial_success";
+                    }
                 }
-                else
-                {
-                    System.Diagnostics.Debug.WriteLine("[CreateMeeting] Attempting to Save appointment...");
-                    appointment.Save();
-                    System.Diagnostics.Debug.WriteLine("[CreateMeeting] Appointment.Save() called.");
-                    response.Message = "Meeting saved to calendar.";
-                }
-                response.MeetingId = appointment.EntryID; // This will fail if Save/Send failed and item wasn't created
-                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] MeetingId: {response.MeetingId}");
-                response.Status = allResolved ? "success" : "partial_success";
             }
-            catch (COMException comEx) // Catch COM exceptions specifically
+            catch (COMException comEx)
             {
-                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] COMException: {comEx.ToString()}"); // Full details
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Outer COMException: {comEx.ToString()}");
                 response.Errors.Add(new McpError { Code = "OutlookComError", Message = $"COM Error: {comEx.Message} (ErrorCode: {comEx.ErrorCode})" });
                 response.Status = "failure";
-                response.Message = "[CreateMeeting] General Exception: {ex.ToString()}"; // Full details
-                response.Errors.Add(new McpError { Code = "CreateMeetingError", Message = comEx.Message });
-                response.Status = "failure";
-                response.Message = "[CreateMeeting] Exiting. Status: {response.Status}, Errors: {response.Errors.Count}";
-                return response;
+                response.Message = $"Failed to create meeting due to COM error: {comEx.Message}";
             }
             catch (Exception ex)
             {
-                response.Errors.Add(new McpError { Code = "GeneralCreateMeetingError", Message = ex.Message });
+                System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Outer General Exception: {ex.ToString()}");
+                response.Errors.Add(new McpError { Code = "CreateMeetingError", Message = ex.Message });
                 response.Status = "failure";
-                response.Message = $"General failure creating meeting: {ex.Message}";
+                response.Message = $"Failed to create meeting: {ex.Message}";
             }
             finally
             {
-                if (appointment != null) Marshal.ReleaseComObject(appointment);
+                if (appointment != null)
+                {
+                    System.Diagnostics.Debug.WriteLine("[CreateMeeting] Releasing AppointmentItem COM object.");
+                    Marshal.ReleaseComObject(appointment);
+                }
             }
+            System.Diagnostics.Debug.WriteLine($"[CreateMeeting] Exiting. Final Status: {response.Status}, Errors: {response.Errors.Count}, MeetingId: {response.MeetingId}");
             return response;
         }
-
         // --- Helper methods for building DASL filters ---
         private string BuildEmailFilter(string query, DateTime? start, DateTime? end)
         {

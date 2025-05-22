@@ -23,32 +23,49 @@ namespace OutlookMcpAddIn
             Converters = { new JsonStringEnumConverter() } // For serializing enums as strings
         };
 
-        public static void Start(IOutlookController controller, SynchronizationContext syncContext) // syncContext can be null
+        public static void Start(IOutlookController controller, SynchronizationContext syncContext)
         {
-            if (_isRunning) return;
+            System.Diagnostics.Debug.WriteLine("MCPHttpServer.Start() called."); // ADD THIS
+            if (_isRunning)
+            {
+                System.Diagnostics.Debug.WriteLine("MCPHttpServer.Start() aborted: _isRunning is true."); // ADD THIS
+                return;
+            }
 
             _outlookController = controller ?? throw new ArgumentNullException(nameof(controller));
-            _outlookSyncContext = syncContext; // Store it, even if it's null
+            _outlookSyncContext = syncContext;
 
             _listener = new HttpListener();
-            _listener.Prefixes.Add(_prefix);
+            _listener.Prefixes.Add(_prefix); // _prefix is "http://localhost:8999/mcp/"
+
+            System.Diagnostics.Debug.WriteLine($"MCPHttpServer: Attempting to listen on prefix: {_prefix}. SyncContext is {(_outlookSyncContext == null ? "NULL" : "Present")}"); // ADD THIS
+
             try
             {
-                _listener.Start();
+                // CHECK PORT AGAIN RIGHT BEFORE STARTING
+                bool isPortFree = IsPortAvailable(8999); // Implement IsPortAvailable helper
+                System.Diagnostics.Debug.WriteLine($"MCPHttpServer: Is port 8999 free right before _listener.Start()? {isPortFree}");
+                if (!isPortFree)
+                {
+                    System.Diagnostics.Debug.WriteLine("MCPHttpServer: Port 8999 reported as NOT FREE immediately before attempting to start listener. Aborting Start.");
+                    // Find out what took it using netstat again, this is the crucial moment.
+                    return;
+                }
+
+                _listener.Start(); // This is the line that throws
                 _isRunning = true;
-                Task.Run(() => ListenLoop()); // Fire and forget the listen loop
-                System.Diagnostics.Debug.WriteLine($"MCP HTTP Server listening on {_prefix}. SyncContext is {(_outlookSyncContext == null ? "NULL" : "Present")}");
+                Task.Run(() => ListenLoop());
+                System.Diagnostics.Debug.WriteLine($"MCPHttpServer: Successfully started. Listening on {_prefix}."); // MOVED HERE
             }
             catch (HttpListenerException hlex)
             {
-                System.Diagnostics.Debug.WriteLine($"MCP HTTP Server start failed: {hlex.Message}. " +
-                    "Ensure port is free and URL ACL is set (e.g., 'netsh http add urlacl url=http://localhost:8899/ user=EVERYONE')");
-                _isRunning = false; // Ensure state is correct if start fails
+                System.Diagnostics.Debug.WriteLine($"MCP HTTP Server start failed: {hlex.ToString()}"); // Use ToString() for more details
+                _isRunning = false;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"MCP HTTP Server general error on start: {ex.Message}");
-                _isRunning = false; // Ensure state is correct if start fails
+                System.Diagnostics.Debug.WriteLine($"MCP HTTP Server general error on start: {ex.ToString()}"); // Use ToString()
+                _isRunning = false;
             }
         }
 
@@ -72,6 +89,34 @@ namespace OutlookMcpAddIn
                 System.Diagnostics.Debug.WriteLine("MCP HTTP Server stopped.");
             }
         }
+
+        // Helper method to check port availability (basic check)
+        private static bool IsPortAvailable(int port)
+        {
+            bool isAvailable = true;
+            try
+            {
+                System.Net.NetworkInformation.IPGlobalProperties ipGlobalProperties = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties();
+                System.Net.IPEndPoint[] tcpListeners = ipGlobalProperties.GetActiveTcpListeners();
+
+                foreach (System.Net.IPEndPoint ep in tcpListeners)
+                {
+                    if (ep.Port == port)
+                    {
+                        isAvailable = false;
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"IsPortAvailable check failed: {ex.Message}");
+                // Assume not available if check fails, to be safe
+                isAvailable = false;
+            }
+            return isAvailable;
+        }
+
 
         private static async Task ListenLoop()
         {

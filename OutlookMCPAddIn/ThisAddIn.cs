@@ -2,6 +2,7 @@
 using System;
 using System.Threading;
 using Outlook = Microsoft.Office.Interop.Outlook;
+using System.Windows.Forms;
 // using Office = Microsoft.Office.Core; // Usually not needed unless using CommandBars etc.
 
 namespace OutlookMcpAddIn // Ensure this namespace matches your project
@@ -9,7 +10,8 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
     public partial class ThisAddIn
     {
         private static OutlookController _outlookController;
-        private static SynchronizationContext _syncContext;
+        private static SynchronizationContext _outlookMainThreadSyncContext; // This will be our reliable one
+        private Control _hiddenControlForContext; // Helper to get context
 
         // The ThisAddIn_Startup and ThisAddIn_Shutdown methods are event handlers.
         // They are wired up in the InternalStartup method, which IS CALLED by VSTO.
@@ -19,34 +21,58 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
             try
             {
                 Outlook.Application outlookApplication = Globals.ThisAddIn.Application;
-                _syncContext = SynchronizationContext.Current; // Attempt to capture
+
+                // Create a hidden control on the current thread (which is Outlook's main thread for Startup)
+                // This control's Invoke/BeginInvoke will marshal to this thread.
+                _hiddenControlForContext = new Control();
+                _hiddenControlForContext.CreateControl(); // Ensures the handle is created
+
+                // Get the SynchronizationContext from this control
+                // However, a Control itself is an ISynchronizeInvoke provider.
+                // It's often more direct to pass the control itself for marshalling.
+
+                // Let's try getting SynchronizationContext from the control's thread
+                // This is a bit indirect. A better way is to use the control directly for Invoke.
+                // SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext()); // Don't do this globally
+                // _outlookMainThreadSyncContext = SynchronizationContext.Current; // Capture after creating control
+
+                // Simpler: Pass the control to McpHttpServer and let it use control.Invoke/BeginInvoke
+                // Or, if McpHttpServer strictly needs a SynchronizationContext object:
+                if (_hiddenControlForContext.IsHandleCreated)
+                {
+                    // This is a way to get a WindowsFormsSynchronizationContext if one isn't current
+                    // but it's usually better to use the control's ISynchronizeInvoke methods.
+                    // Forcing one like this might not be ideal.
+                    // Let's try to capture SynchronizationContext.Current AGAIN after creating the control.
+                    // Often, creating a WinForms control on a thread installs a WindowsFormsSynchronizationContext if one isn't there.
+                    _outlookMainThreadSyncContext = SynchronizationContext.Current;
+                }
+
+
+                if (_outlookMainThreadSyncContext == null)
+                {
+                    // Fallback: If SynchronizationContext.Current is STILL null even after creating a control,
+                    // this is highly unusual for the thread running ThisAddIn_Startup.
+                    // We might have to resort to a timer polling mechanism for McpHttpServer.
+                    System.Diagnostics.Debug.WriteLine("CRITICAL: Still could not obtain a SynchronizationContext even after creating a hidden control. MCP Server will not start with marshalling.");
+                    // For now, prevent server start if this fails, as it's fundamental.
+                    return;
+                }
+
 
                 if (_outlookController == null)
                 {
                     _outlookController = new OutlookController(outlookApplication);
                 }
 
-                if (_syncContext != null)
-                {
-                    // Only attempt to start the server if we have a sync context.
-                    // McpHttpServer.Start still needs to be robust if _syncContext is null,
-                    // OR McpHttpServer.Start should throw if syncContext is null and it can't operate without it.
-                    // For now, assuming McpHttpServer.Start will handle a null syncContext argument (as modified below).
-                    McpHttpServer.Start(_outlookController, _syncContext);
-                    System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Started and MCP Server Initialized.");
-                }
-                else
-                {
-                    System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Started, but MCP Server NOT Initialized: SynchronizationContext.Current was null. Calls to Outlook may fail.");
-                    // Optionally, inform the user or log this as a critical failure for the MCP functionality.
-                    // For example, you could display a MessageBox:
-                    // System.Windows.Forms.MessageBox.Show("A required component (SynchronizationContext) for AI features could not be initialized. Some functionality may be impaired.", "Add-in Warning", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning);
-                }
+                // Pass the captured (hopefully valid) _outlookMainThreadSyncContext
+                McpHttpServer.Start(_outlookController, _outlookMainThreadSyncContext);
+                System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Started and MCP Server Initialized with context from hidden control.");
+
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error in ThisAddIn_Startup: {ex.ToString()}");
-                // System.Windows.Forms.MessageBox.Show($"Critical error during add-in startup: {ex.Message}", "Add-in Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
             }
         }
 
@@ -54,9 +80,14 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
         {
             try
             {
-                McpHttpServer.Stop(); // McpHttpServer.Stop() should be safe even if Start wasn't fully successful
+                McpHttpServer.Stop();
+                if (_hiddenControlForContext != null)
+                {
+                    _hiddenControlForContext.Dispose();
+                    _hiddenControlForContext = null;
+                }
                 _outlookController = null;
-                _syncContext = null; // Clear it
+                _outlookMainThreadSyncContext = null;
 
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
@@ -67,6 +98,7 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
                 System.Diagnostics.Debug.WriteLine($"Error in ThisAddIn_Shutdown: {ex.ToString()}");
             }
         }
+
 
         #region VSTO generated code
         private void InternalStartup()

@@ -18,27 +18,35 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
         {
             try
             {
-                // Access the Outlook Application object.
-                // In VSTO, 'Globals.ThisAddIn.Application' is a reliable way to get it.
-                // Or, if your VSTO project directly exposes it on 'this', then 'this.Application' is fine.
-                // Since 'this.Application' gave an error, let's try Globals.
-                Outlook.Application outlookApplication = this.Application; // If this.Application is truly missing, this line is the problem source
-                                                                           // Let's assume for a moment the issue is with the event wiring, not Application access.
-                _syncContext = SynchronizationContext.Current;
+                Outlook.Application outlookApplication = Globals.ThisAddIn.Application;
+                _syncContext = SynchronizationContext.Current; // Attempt to capture
+
                 if (_outlookController == null)
                 {
-                    // Pass the application object obtained above
                     _outlookController = new OutlookController(outlookApplication);
                 }
 
-                McpHttpServer.Start(_outlookController, _syncContext);
-                System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Started and MCP Server Initialized.");
+                if (_syncContext != null)
+                {
+                    // Only attempt to start the server if we have a sync context.
+                    // McpHttpServer.Start still needs to be robust if _syncContext is null,
+                    // OR McpHttpServer.Start should throw if syncContext is null and it can't operate without it.
+                    // For now, assuming McpHttpServer.Start will handle a null syncContext argument (as modified below).
+                    McpHttpServer.Start(_outlookController, _syncContext);
+                    System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Started and MCP Server Initialized.");
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Started, but MCP Server NOT Initialized: SynchronizationContext.Current was null. Calls to Outlook may fail.");
+                    // Optionally, inform the user or log this as a critical failure for the MCP functionality.
+                    // For example, you could display a MessageBox:
+                    // System.Windows.Forms.MessageBox.Show("A required component (SynchronizationContext) for AI features could not be initialized. Some functionality may be impaired.", "Add-in Warning", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning);
+                }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error in ThisAddIn_Startup: {ex.ToString()}");
-                // Consider user notification for critical startup failures
-                // System.Windows.Forms.MessageBox.Show($"Failed to start MCP Add-in: {ex.Message}", "Add-in Error");
+                // System.Windows.Forms.MessageBox.Show($"Critical error during add-in startup: {ex.Message}", "Add-in Error", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
             }
         }
 
@@ -46,13 +54,13 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
         {
             try
             {
-                McpHttpServer.Stop();
+                McpHttpServer.Stop(); // McpHttpServer.Stop() should be safe even if Start wasn't fully successful
                 _outlookController = null;
-                _syncContext = null;
+                _syncContext = null; // Clear it
 
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
-                System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Shutdown initiated and MCP Server Stopped.");
+                System.Diagnostics.Debug.WriteLine("OutlookMcpAddIn (VSTO) Shutdown initiated.");
             }
             catch (Exception ex)
             {
@@ -61,20 +69,11 @@ namespace OutlookMcpAddIn // Ensure this namespace matches your project
         }
 
         #region VSTO generated code
-
-        /// <summary>
-        /// Required method for Designer support - do not modify
-        /// the contents of this method with the code editor.
-        /// </summary>
         private void InternalStartup()
         {
-            // These lines are crucial. If 'Startup' and 'Shutdown' events are not found on 'this',
-            // it means the 'ThisAddIn' partial class definition is missing them or they are
-            // defined in a way the compiler isn't recognizing from this context.
             this.Startup += new System.EventHandler(ThisAddIn_Startup);
             this.Shutdown += new System.EventHandler(ThisAddIn_Shutdown);
         }
-
         #endregion
     }
 }

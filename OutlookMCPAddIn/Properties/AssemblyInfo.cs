@@ -7,7 +7,7 @@ using System.Security;
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
 [assembly: AssemblyTitle("OutlookMCPAddIn")]
-[assembly: AssemblyDescription("")]
+[assembly: AssemblyDescription("Outlook Add-in providing Model Context Protocol")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyProduct("OutlookMCPAddIn")]
